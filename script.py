@@ -1,6 +1,7 @@
 import gymnasium
 import flappy_bird_gymnasium
 import numpy as np
+import pygame
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -157,6 +158,11 @@ for episode in range(NUM_EPISODES):
     total_reward = 0
 
     while not done:
+        actions = pygame.key.get_pressed()
+        if actions[pygame.K_ESCAPE]:
+            pygame.quit()
+            exit(1)
+
         action = epsilon_greedy_action(q_network, frames, epsilon, action_space)
         #next_obs, reward, terminated, truncated, _ = env.step(action)
         #next_frame = preprocess_frame(next_obs)
