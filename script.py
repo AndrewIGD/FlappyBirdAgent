@@ -12,14 +12,19 @@ import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+print("Running on " + device.type)
+
+testing_model = "./temp/model5400.pth"
+
 GAMMA = 0.99
 LEARNING_RATE = 1e-4
-BATCH_SIZE = 32
+BATCH_SIZE = 100
 EPSILON_START = 0.1
 EPSILON_END = 1e-4
 EPSILON_DECAY = 0.995
 REPLAY_MEMORY_SIZE = 50000
-NUM_EPISODES = 10000
+NUM_EPISODES = 100000
+CURRENT_EPISODE = 5400
 FRAME_SKIP = 4
 STACK_SIZE = 4
 
@@ -55,19 +60,21 @@ class FrameStack:
         self.frames.append(frame)
 
     def get(self):
-        return torch.stack(list(self.frames))
+        return torch.stack(list(self.frames)).to(device)
 
 class QNetwork(nn.Module):
     def __init__(self):
         super(QNetwork, self).__init__()
 
         self.conv = nn.Sequential(
-            nn.Conv2d(4, 32, kernel_size=8, stride=4),
+            nn.Conv2d(4, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(num_features=32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.MaxPool2d(kernel_size=2, stride=3),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(num_features=64),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
         self.fc = nn.Sequential(
             nn.Linear(64 * 7 * 7, 512),
@@ -93,12 +100,17 @@ def epsilon_greedy_action(network, state, epsilon, action_space):
         return torch.argmax(action).item()
 
 env = gymnasium.make("FlappyBird-v0", render_mode="human", use_lidar=False)
+env.metadata["render_fps"] = 60
 action_space = 1
 
 q_network = QNetwork().to(device)
-target_network = QNetwork().to(device)
-target_network.load_state_dict(q_network.state_dict())
-target_network.eval()
+
+test_mode = False
+if testing_model != "":
+    q_network.load_state_dict(torch.load(testing_model))
+    #q_network.eval()
+    #test_mode = True
+    print("Running model from path: " + testing_model)
 
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(q_network.parameters(), lr=LEARNING_RATE)
@@ -130,7 +142,7 @@ def backprop():
 
     q_values = torch.sum(q_network(states) * actions, dim=1)
 
-    next_state_values = target_network(next_states)
+    next_state_values = q_network(next_states)
 
     expected_state_values = torch.stack(tuple(
         next_state_reward if next_state_done else next_state_reward + GAMMA * torch.max(next_state_value) for next_state_value, next_state_reward, next_state_done in zip(next_state_values, rewards, dones)
@@ -140,12 +152,15 @@ def backprop():
     loss.backward()
 
     optimizer.step()
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
-for episode in range(NUM_EPISODES):
+for episode in range(CURRENT_EPISODE, NUM_EPISODES):
     obs, _ = env.reset()
     done = False
     total_reward = 0
+
+    if episode % 200 == 0:
+        torch.save(q_network.state_dict(), f"model{episode}.pth")
 
     while not done:
         actions = pygame.key.get_pressed()
@@ -178,9 +193,11 @@ for episode in range(NUM_EPISODES):
         replay_buffer.add((current_state, [1, 0] if action == 0 else [0, 1], reward, next_state, done))
         total_reward += total_skip_reward
 
-        backprop()
+        if not test_mode:
+            backprop()
 
     epsilon = max(EPSILON_END, EPSILON_END + (EPSILON_START - EPSILON_END) / NUM_EPISODES * (NUM_EPISODES - episode))
+    print("Epsion " + str(epsilon))
     total_rewards.append(total_reward)
     print(f"Episode {episode}, Total Reward: {total_reward}")
 
