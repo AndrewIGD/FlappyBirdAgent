@@ -13,22 +13,24 @@ import matplotlib.pyplot as plt
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 GAMMA = 0.99
-LEARNING_RATE = 0.001
-BATCH_SIZE = 100
-EPSILON_START = 1
-EPSILON_END = 0.01
+LEARNING_RATE = 1e-4
+BATCH_SIZE = 32
+EPSILON_START = 0.1
+EPSILON_END = 1e-4
 EPSILON_DECAY = 0.995
-REPLAY_MEMORY_SIZE = 10000
-TARGET_UPDATE_FREQ = 1000
-NUM_EPISODES = 200
+REPLAY_MEMORY_SIZE = 50000
+NUM_EPISODES = 10000
 FRAME_SKIP = 4
 STACK_SIZE = 4
 
 def preprocess_frame(frame):
     frame = np.array(frame, dtype=np.float32)
+    frame = cv2.resize(frame, (84, 84))
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    frame /= 255.0
-    return torch.tensor(frame).float()
+    frame = cv2.convertScaleAbs(frame, alpha=1.5, beta=10)
+    frame = cv2.bitwise_not(frame)
+    _, frame = cv2.threshold(frame, 1, 255, cv2.THRESH_BINARY)
+    return torch.tensor(frame).float().to(device)
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -45,12 +47,22 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
+class FrameStack:
+    def __init__(self, stack_size):
+        self.frames = deque(maxlen=stack_size)
+
+    def add(self, frame):
+        self.frames.append(frame)
+
+    def get(self):
+        return torch.stack(list(self.frames))
+
 class QNetwork(nn.Module):
-    def __init__(self, input_dim, action_dim):
+    def __init__(self):
         super(QNetwork, self).__init__()
 
         self.conv = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=8, stride=4),
+            nn.Conv2d(4, 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
@@ -58,16 +70,13 @@ class QNetwork(nn.Module):
             nn.ReLU(),
         )
         self.fc = nn.Sequential(
-            nn.Linear(64 * 1920, 512),
+            nn.Linear(64 * 7 * 7, 512),
             nn.ReLU(),
-            nn.Linear(512, action_dim),
+            nn.Linear(512, 2),
         )
 
     def forward(self, x):
         x = self.conv(x)
-        if x.dim() == 4:
-            for i in range(x.shape[1]):
-                cv2.imwrite(f"./poze/poza{i}.png", x[0][i].detach().numpy())
         x = x.flatten(start_dim=x.dim() - 3)
         x = self.fc(x)
         x = torch.sigmoid(x)
@@ -79,27 +88,33 @@ def epsilon_greedy_action(network, state, epsilon, action_space):
         return random.randint(0, action_space - 1)
     else:
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
-        action = network(state_tensor)[0]
-        if action > 0.5:
-            action = 1
-        else: action = 0
+        action = network(state_tensor)
 
-        return action
+        return torch.argmax(action).item()
 
 env = gymnasium.make("FlappyBird-v0", render_mode="human", use_lidar=False)
 action_space = 1
 
-q_network = QNetwork(STACK_SIZE, action_space).to(device)
-target_network = QNetwork(STACK_SIZE, action_space).to(device)
+q_network = QNetwork().to(device)
+target_network = QNetwork().to(device)
 target_network.load_state_dict(q_network.state_dict())
 target_network.eval()
 
-loss_fn = nn.CrossEntropyLoss()
+loss_fn = nn.MSELoss()
 optimizer = optim.Adam(q_network.parameters(), lr=LEARNING_RATE)
 replay_buffer = ReplayBuffer(REPLAY_MEMORY_SIZE)
+frame_stack = FrameStack(STACK_SIZE)
 
 epsilon = EPSILON_START
 total_rewards = []
+
+obs, _ = env.reset()
+
+next_frame = pygame.surfarray.array3d(pygame.display.get_surface())
+next_frame = preprocess_frame(next_frame)
+
+for i in range(STACK_SIZE):
+    frame_stack.add(next_frame)
 
 def backprop():
     if len(replay_buffer) < BATCH_SIZE:
@@ -107,18 +122,22 @@ def backprop():
 
     transitions = replay_buffer.sample(BATCH_SIZE)
 
-    states = torch.stack(transitions[0]).unsqueeze(1)
-    rewards = torch.tensor(transitions[2], dtype=torch.float32)
+    states = torch.stack(transitions[0]).to(device)
+    actions = torch.from_numpy(np.array(transitions[1])).to(device)
+    rewards = torch.tensor(transitions[2], dtype=torch.float32).to(device)
+    next_states = torch.stack(transitions[3]).to(device)
+    dones = torch.tensor(transitions[4], dtype=torch.bool).to(device)
 
-    q_values = q_network(states).flatten()
+    q_values = torch.sum(q_network(states) * actions, dim=1)
 
-    expected_state_values = (target_network(states).max(1).values * GAMMA) + rewards
+    next_state_values = target_network(next_states)
+
+    expected_state_values = torch.stack(tuple(
+        next_state_reward if next_state_done else next_state_reward + GAMMA * torch.max(next_state_value) for next_state_value, next_state_reward, next_state_done in zip(next_state_values, rewards, dones)
+    ))
 
     loss = loss_fn(q_values, expected_state_values)
-
     loss.backward()
-
-    torch.nn.utils.clip_grad_value_(q_network.parameters(), 100)
 
     optimizer.step()
     optimizer.zero_grad()
@@ -128,18 +147,15 @@ for episode in range(NUM_EPISODES):
     done = False
     total_reward = 0
 
-    next_frame = pygame.surfarray.array3d(pygame.display.get_surface())
-    next_frame = preprocess_frame(next_frame)
-
     while not done:
         actions = pygame.key.get_pressed()
         if actions[pygame.K_ESCAPE]:
             pygame.quit()
             exit(1)
 
-        current_frame = next_frame
+        current_state = frame_stack.get()
 
-        action = epsilon_greedy_action(q_network, current_frame, epsilon, action_space)
+        action = epsilon_greedy_action(q_network, current_state, epsilon, action_space)
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
 
@@ -154,16 +170,17 @@ for episode in range(NUM_EPISODES):
         next_frame = pygame.surfarray.array3d(pygame.display.get_surface())
         next_frame = preprocess_frame(next_frame)
 
-        replay_buffer.add((current_frame, action, reward, next_frame))
-        total_reward += total_skip_reward
+        frame_stack.add(next_frame)
+
+        next_state = frame_stack.get()
+
         done = terminated or truncated
+        replay_buffer.add((current_state, [1, 0] if action == 0 else [0, 1], reward, next_state, done))
+        total_reward += total_skip_reward
 
         backprop()
 
-    if episode % TARGET_UPDATE_FREQ == 0:
-        target_network.load_state_dict(q_network.state_dict())
-
-    epsilon = max(EPSILON_END, epsilon - (EPSILON_START - EPSILON_END) / EPSILON_DECAY)
+    epsilon = max(EPSILON_END, EPSILON_END + (EPSILON_START - EPSILON_END) / NUM_EPISODES * (NUM_EPISODES - episode))
     total_rewards.append(total_reward)
     print(f"Episode {episode}, Total Reward: {total_reward}")
 
