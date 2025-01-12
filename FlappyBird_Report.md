@@ -6,8 +6,17 @@ This document presents a comprehensive overview of implementing and training a n
 ---
 
 ## **1. Architecture**
+
+### **Pre-processing**
+We're aiming to convert the image that pygame gives us into a solid black & white image in which the bird and the pipes should be recognizable and easily distinguishable from the background elements. So, we're going to:
+- Resize the image to 84x84, since high resolutions just slow down the training speed in this case
+- Grayscale the image, we don't need color information
+- Apply contrast & brightness (alpha = 1.5, beta = 10). This makes the background completely white, leaving only the bird, pipes, score and floor visible
+- Invert the image
+- Threshold the image
+
 ### **Q-Network**
-The Q-Network is a Convolutional Neural Network (CNN) that processes stacked frames of the game environment and outputs Q-values corresponding to each possible action (`flap` or `do nothing`). This network architecture is composed of the following layers:
+The Q-Network is a Convolutional Neural Network (CNN) that processes stacked frames of the game environment and outputs Q-values corresponding to each possible action (`flap` or `do nothing`). Since we're aiming for a balance between computation speed and training speed, we're going to use only 2 convolutions. Thus, the network architecture is composed of the following layers:
 
 - **Input Layer**:
   - The input to the network is a tensor of shape 4x84x84, representing 4 consecutive grayscale frames of size 84x84 pixels.
@@ -15,21 +24,23 @@ The Q-Network is a Convolutional Neural Network (CNN) that processes stacked fra
 - **Convolutional Layers**:
   1. **Conv2D Layer 1**:
      - Number of Filters: 32
-     - Kernel Size: 8x8
-     - Stride: 4
+     - Kernel Size: 3x3
+     - Stride: 2 (the starting image is 84x84, so we don't lose a lot of information)
+     - Padding: 1
+     - Includes BatchNorm2d (to stabilize training and for faster convergence)
      - Activation Function: ReLU
+     - Includes MaxPool2d
+         - Stride: 3
 
   2. **Conv2D Layer 2**:
      - Number of Filters: 64
-     - Kernel Size: 4x4
-     - Stride: 2
-     - Activation Function: ReLU
-
-  3. **Conv2D Layer 3**:
-     - Number of Filters: 64
      - Kernel Size: 3x3
      - Stride: 1
+     - Padding: 1
+     - Includes BatchNorm2d
      - Activation Function: ReLU
+     - Includes MaxPool2d
+         - Stride: 2
 
 - **Fully Connected Layers**:
   1. **Fully Connected Layer 1**:
@@ -97,22 +108,18 @@ The following hyperparameters were used in the implementation, along with explan
    - **Value**: 1e-4
    - **Purpose**: Minimum exploration probability. Ensures the agent continues to explore occasionally even in late stages of training.
 
-6. **EPSILON_DECAY**:
-   - **Value**: 0.995
-   - **Purpose**: The rate at which epsilon decays after each episode, gradually reducing exploration over time.
-
-7. **REPLAY_MEMORY_SIZE**:
+6. **REPLAY_MEMORY_SIZE**:
    - **Value**: 50,000
    - **Purpose**: Maximum number of experiences stored in the replay buffer. This enables the agent to learn from a diverse set of past experiences.
-8. **NUM_EPISODES**:
+7. **NUM_EPISODES**:
     - **Value**: 10,000
     - **Purpose**: Total number of training episodes to allow sufficient learning.
 
-9. **FRAME_SKIP**:
+8. **FRAME_SKIP**:
    - **Value**: 4
    - **Purpose**: Number of frames skipped between actions to reduce computational load and focus on meaningful transitions.
 
-10. **STACK_SIZE**:
+9. **STACK_SIZE**:
     - **Value**: 4
     - **Purpose**: Number of consecutive frames stacked together as input. This provides temporal context for the agent.
 
