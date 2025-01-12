@@ -116,4 +116,3 @@ The following hyperparameters were used in the implementation, along with explan
     - **Value**: 4
     - **Purpose**: Number of consecutive frames stacked together as input. This provides temporal context for the agent.
 
----
